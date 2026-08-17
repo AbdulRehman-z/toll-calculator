@@ -3,7 +3,7 @@ obu:
 	@obu/bin/obu
 
 receiver:
-	@go build -o receiver/bin/receiver receiver/main.go
+	@go build -o receiver/bin/receiver ./receiver
 	@receiver/bin/receiver
 
 .PHONY: obu receiver
