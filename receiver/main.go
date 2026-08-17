@@ -17,21 +17,30 @@ import (
 	"github.com/lmittmann/tint"
 )
 
+var KafkaTopic = "obu-data"
+
 type DataRevceiver struct {
-	addr   string
-	dataCh chan shared.OBUData
-	connWG sync.WaitGroup
+	addr     string
+	dataCh   chan shared.OBUData
+	producer DataProducer
+	connWG   sync.WaitGroup
 
 	mu    sync.RWMutex
 	conns map[*websocket.Conn]struct{}
 }
 
-func NewDataReceiver(addr string) *DataRevceiver {
-	return &DataRevceiver{
-		addr:   addr,
-		dataCh: make(chan shared.OBUData, 1028),
-		conns:  map[*websocket.Conn]struct{}{},
+func NewDataReceiver(addr string) (*DataRevceiver, error) {
+	p, err := NewKafkaProducer()
+	if err != nil {
+		return nil, err
 	}
+
+	return &DataRevceiver{
+		addr:     addr,
+		dataCh:   make(chan shared.OBUData, 1028),
+		producer: p,
+		conns:    map[*websocket.Conn]struct{}{},
+	}, nil
 }
 
 func main() {
@@ -43,7 +52,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	dr := NewDataReceiver(":3000")
+	dr, err := NewDataReceiver(":3000")
+	if err != nil {
+		slog.Error("failed to create data receiver", "err", err.Error())
+		return
+	}
 
 	var workerWG sync.WaitGroup
 	workers := runtime.NumCPU()
@@ -52,7 +65,9 @@ func main() {
 		go func(i int) {
 			defer workerWG.Done()
 			for data := range dr.dataCh {
-				slog.Info("obu received", "worker_id", i+1, "obu", data)
+				if err := dr.producer.ProduceData(data); err != nil {
+					slog.Error("failed to produce data", "err", err.Error())
+				}
 			}
 		}(i)
 	}
@@ -83,13 +98,14 @@ func main() {
 
 	// close all the opened connections
 	dr.closeAllConns()
-
 	// wait for all connection handlers to actually exit
 	dr.connWG.Wait()
-
 	// now safe to close BECAUSE guaranteed no one is sending anymore
 	close(dr.dataCh)
-
+	// wait for all the in-flight messages to be sent
+	dr.producer.Flush(5000)
+	// close the producer
+	dr.producer.Close()
 	// let workers drain whatever's left, then exit
 	workerWG.Wait()
 
